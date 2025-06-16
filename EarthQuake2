@@ -1,0 +1,231 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score
+import datetime
+import time
+import warnings
+warnings.filterwarnings('ignore')
+
+# Load and prepare data
+data = pd.read_csv("/content/database.csv")
+print(f"Original data shape: {data.shape}")
+print(f"Columns: {data.columns.tolist()}")
+
+# Select relevant columns
+data = data[['Date', 'Time', 'Latitude', 'Longitude', 'Depth', 'Magnitude']]
+print(f"Data after column selection: {data.shape}")
+print(data.head())
+
+# Convert Date and Time to timestamp
+timestamp = []
+for d, t in zip(data['Date'], data['Time']):
+    try:
+        ts = datetime.datetime.strptime(d+' '+t, '%m/%d/%Y %H:%M:%S')
+        timestamp.append(time.mktime(ts.timetuple()))
+    except ValueError:
+        timestamp.append(np.nan)  # Use NaN instead of string
+
+# Add timestamp column
+data['Timestamp'] = timestamp
+
+# Drop rows with invalid timestamps and original date/time columns
+final_data = data.drop(['Date', 'Time'], axis=1)
+final_data = final_data.dropna()  # Remove rows with NaN timestamps
+print(f"Data after cleaning: {final_data.shape}")
+print(final_data.head())
+
+# Visualization (optional - requires basemap which might not be available)
+try:
+    from mpl_toolkits.basemap import Basemap
+    print("\nCreating visualization...")
+
+    m = Basemap(projection='mill', llcrnrlat=-80, urcrnrlat=80,
+                llcrnrlon=-180, urcrnrlon=180, lat_ts=20, resolution='c')
+
+    longitudes = final_data["Longitude"].tolist()
+    latitudes = final_data["Latitude"].tolist()
+
+    x, y = m(longitudes, latitudes)
+
+    fig = plt.figure(figsize=(12, 10))
+    plt.title("All affected areas")
+    m.plot(x, y, "o", markersize=2, color='blue')
+    m.drawcoastlines()
+    m.fillcontinents(color='coral', lake_color='aqua')
+    m.drawmapboundary()
+    m.drawcountries()
+    plt.show()
+
+except ImportError:
+    print("Basemap not available. Skipping visualization.")
+    # Alternative simple plot
+    plt.figure(figsize=(12, 8))
+    plt.scatter(final_data['Longitude'], final_data['Latitude'],
+                c=final_data['Magnitude'], cmap='viridis', alpha=0.6)
+    plt.colorbar(label='Magnitude')
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    plt.title('Earthquake Locations colored by Magnitude')
+    plt.show()
+
+# Prepare features and targets for REGRESSION (not classification)
+print("\nPreparing features and targets...")
+X = final_data[['Timestamp', 'Latitude', 'Longitude']].values
+y = final_data[['Magnitude', 'Depth']].values
+
+print(f"Features shape: {X.shape}")
+print(f"Targets shape: {y.shape}")
+
+# Scale features
+scaler_X = StandardScaler()
+scaler_y = StandardScaler()
+X_scaled = scaler_X.fit_transform(X)
+y_scaled = scaler_y.fit_transform(y)
+
+# Split the data
+X_train, X_test, y_train, y_test = train_test_split(
+    X_scaled, y_scaled, test_size=0.2, random_state=42
+)
+
+print(f"Training shapes: X_train={X_train.shape}, y_train={y_train.shape}")
+print(f"Testing shapes: X_test={X_test.shape}, y_test={y_test.shape}")
+
+# Neural Network Model (using TensorFlow/Keras)
+try:
+    import tensorflow as tf
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import Dense, Dropout
+    from tensorflow.keras.optimizers import Adam
+
+    print("\nBuilding neural network model...")
+
+    def create_regression_model(neurons=64, activation='relu', optimizer='adam',
+                               learning_rate=0.001, dropout_rate=0.2):
+        model = Sequential([
+            Dense(neurons, activation=activation, input_shape=(3,)),
+            Dropout(dropout_rate),
+            Dense(neurons//2, activation=activation),
+            Dropout(dropout_rate),
+            Dense(neurons//4, activation=activation),
+            Dense(2, activation='linear')  # Linear activation for regression
+        ])
+
+        if optimizer == 'adam':
+            opt = Adam(learning_rate=learning_rate)
+        else:
+            opt = optimizer
+
+        model.compile(optimizer=opt, loss='mse', metrics=['mae'])
+        return model
+
+    # Create and train the model
+    model = create_regression_model(neurons=128, activation='relu',
+                                   learning_rate=0.001, dropout_rate=0.3)
+
+    print("Model architecture:")
+    model.summary()
+
+    # Train the model
+    print("\nTraining model...")
+    history = model.fit(X_train, y_train,
+                       batch_size=32,
+                       epochs=50,
+                       verbose=1,
+                       validation_data=(X_test, y_test),
+                       callbacks=[tf.keras.callbacks.EarlyStopping(patience=10)])
+
+    # Evaluate the model
+    print("\nEvaluating model...")
+    train_loss, train_mae = model.evaluate(X_train, y_train, verbose=0)
+    test_loss, test_mae = model.evaluate(X_test, y_test, verbose=0)
+
+    print(f"Training - Loss: {train_loss:.4f}, MAE: {train_mae:.4f}")
+    print(f"Testing - Loss: {test_loss:.4f}, MAE: {test_mae:.4f}")
+
+    # Make predictions
+    y_pred = model.predict(X_test)
+
+    # Inverse transform predictions to original scale
+    y_test_original = scaler_y.inverse_transform(y_test)
+    y_pred_original = scaler_y.inverse_transform(y_pred)
+
+    # Calculate metrics for each target
+    mag_mse = mean_squared_error(y_test_original[:, 0], y_pred_original[:, 0])
+    mag_r2 = r2_score(y_test_original[:, 0], y_pred_original[:, 0])
+    depth_mse = mean_squared_error(y_test_original[:, 1], y_pred_original[:, 1])
+    depth_r2 = r2_score(y_test_original[:, 1], y_pred_original[:, 1])
+
+    print(f"\nMagnitude Prediction - MSE: {mag_mse:.4f}, R²: {mag_r2:.4f}")
+    print(f"Depth Prediction - MSE: {depth_mse:.4f}, R²: {depth_r2:.4f}")
+
+    # Plot training history
+    plt.figure(figsize=(12, 4))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Model Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['mae'], label='Training MAE')
+    plt.plot(history.history['val_mae'], label='Validation MAE')
+    plt.title('Model MAE')
+    plt.xlabel('Epoch')
+    plt.ylabel('MAE')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    # Plot predictions vs actual
+    plt.figure(figsize=(12, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.scatter(y_test_original[:, 0], y_pred_original[:, 0], alpha=0.5)
+    plt.plot([y_test_original[:, 0].min(), y_test_original[:, 0].max()],
+             [y_test_original[:, 0].min(), y_test_original[:, 0].max()], 'r--', lw=2)
+    plt.xlabel('Actual Magnitude')
+    plt.ylabel('Predicted Magnitude')
+    plt.title(f'Magnitude Prediction (R² = {mag_r2:.3f})')
+
+    plt.subplot(1, 2, 2)
+    plt.scatter(y_test_original[:, 1], y_pred_original[:, 1], alpha=0.5)
+    plt.plot([y_test_original[:, 1].min(), y_test_original[:, 1].max()],
+             [y_test_original[:, 1].min(), y_test_original[:, 1].max()], 'r--', lw=2)
+    plt.xlabel('Actual Depth')
+    plt.ylabel('Predicted Depth')
+    plt.title(f'Depth Prediction (R² = {depth_r2:.3f})')
+
+    plt.tight_layout()
+    plt.show()
+
+except ImportError:
+    print("TensorFlow not available. Please install TensorFlow to run the neural network model.")
+    print("Alternative: Use scikit-learn models")
+
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.linear_model import LinearRegression
+
+    # Random Forest as alternative
+    print("Using Random Forest as alternative...")
+    rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+    rf_model.fit(X_train, y_train)
+
+    y_pred_rf = rf_model.predict(X_test)
+
+    # Calculate metrics
+    mag_mse = mean_squared_error(y_test[:, 0], y_pred_rf[:, 0])
+    mag_r2 = r2_score(y_test[:, 0], y_pred_rf[:, 0])
+    depth_mse = mean_squared_error(y_test[:, 1], y_pred_rf[:, 1])
+    depth_r2 = r2_score(y_test[:, 1], y_pred_rf[:, 1])
+
+    print(f"Random Forest Results:")
+    print(f"Magnitude - MSE: {mag_mse:.4f}, R²: {mag_r2:.4f}")
+    print(f"Depth - MSE: {depth_mse:.4f}, R²: {depth_r2:.4f}")
+
